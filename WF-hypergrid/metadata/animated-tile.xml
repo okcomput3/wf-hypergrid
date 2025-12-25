@@ -1,0 +1,98 @@
+<?xml version="1.0"?>
+<wayfire>
+    <plugin name="animated-tile">
+        <_short>Animated Tiling Layout</_short>
+        <_long>
+            Hyprland-inspired animated tiling window manager.
+            Windows smoothly animate when the layout changes.
+            Uses dwindle-style binary tree tiling.
+        </_long>
+        <category>Window Management</category>
+
+        <option name="tile_by_default" type="bool">
+            <_short>Tile Windows by Default</_short>
+            <_long>Automatically tile new windows when they open</_long>
+            <default>true</default>
+        </option>
+
+        <option name="gap" type="int">
+            <_short>Gap Size</_short>
+            <_long>Gap between tiled windows in pixels</_long>
+            <default>10</default>
+            <min>0</min>
+            <max>100</max>
+        </option>
+
+        <option name="duration" type="int">
+            <_short>Animation Duration</_short>
+            <_long>Duration of layout animations in milliseconds</_long>
+            <default>300</default>
+            <min>50</min>
+            <max>2000</max>
+        </option>
+
+        <!-- Bezier curve control points (Hyprland default: fast-start ease-out) -->
+        <option name="bezier_p1_x" type="double">
+            <_short>Bezier P1 X</_short>
+            <_long>First control point X coordinate for animation easing</_long>
+            <default>0.0</default>
+            <min>0.0</min>
+            <max>1.0</max>
+        </option>
+
+        <option name="bezier_p1_y" type="double">
+            <_short>Bezier P1 Y</_short>
+            <_long>First control point Y coordinate for animation easing</_long>
+            <default>0.75</default>
+            <min>-1.0</min>
+            <max>2.0</max>
+        </option>
+
+        <option name="bezier_p2_x" type="double">
+            <_short>Bezier P2 X</_short>
+            <_long>Second control point X coordinate for animation easing</_long>
+            <default>0.15</default>
+            <min>0.0</min>
+            <max>1.0</max>
+        </option>
+
+        <option name="bezier_p2_y" type="double">
+            <_short>Bezier P2 Y</_short>
+            <_long>Second control point Y coordinate for animation easing</_long>
+            <default>1.0</default>
+            <min>-1.0</min>
+            <max>2.0</max>
+        </option>
+
+        <!-- Keybindings -->
+        <option name="toggle_tile" type="activator">
+            <_short>Toggle Tile</_short>
+            <_long>Toggle tiling for the focused window</_long>
+            <default>&lt;super&gt; KEY_T</default>
+        </option>
+
+        <option name="focus_left" type="activator">
+            <_short>Focus Left</_short>
+            <_long>Focus the window to the left</_long>
+            <default>&lt;super&gt; KEY_H</default>
+        </option>
+
+        <option name="focus_right" type="activator">
+            <_short>Focus Right</_short>
+            <_long>Focus the window to the right</_long>
+            <default>&lt;super&gt; KEY_L</default>
+        </option>
+
+        <option name="focus_up" type="activator">
+            <_short>Focus Up</_short>
+            <_long>Focus the window above</_long>
+            <default>&lt;super&gt; KEY_K</default>
+        </option>
+
+        <option name="focus_down" type="activator">
+            <_short>Focus Down</_short>
+            <_long>Focus the window below</_long>
+            <default>&lt;super&gt; KEY_J</default>
+        </option>
+    </plugin>
+</wayfire>
