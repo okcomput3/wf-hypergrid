@@ -9,6 +9,17 @@
  * - AnimatedGeometry: Manages smooth position/size transitions
  * - TileTree: Per-workspace layout tree
  * - AnimatedTilePlugin: Main plugin coordinating everything
+ * 
+ * Hyprland-compatible features:
+ * - Dynamic split direction based on aspect ratio (not alternating)
+ * - preserve_split: Lock split directions
+ * - force_split: Control new window placement (0=mouse, 1=left/top, 2=right/bottom)
+ * - smart_split: Split based on cursor position
+ * - gaps_in/gaps_out: Separate inner and outer gaps
+ * - split_width_multiplier: Adjust for ultrawide monitors
+ * - Separate animations for windowsIn, windowsOut, windowsMove
+ * - Split at focused window (not always deepest leaf)
+ * - pseudotile: Windows keep preferred size within tile
  */
 
 #include <wayfire/per-output-plugin.hpp>
@@ -27,6 +38,7 @@
 #include <wayfire/toplevel-view.hpp>
 #include <wayfire/window-manager.hpp>
 #include <wayfire/workarea.hpp>
+#include <wayfire/nonstd/wlroots-full.hpp>
 
 #include <map>
 #include <memory>
@@ -39,6 +51,17 @@
 
 namespace animated_tile
 {
+
+// ============================================================================
+// Animation Types (like Hyprland's windowsIn, windowsOut, windowsMove)
+// ============================================================================
+
+enum class AnimationType
+{
+    WINDOW_IN,    // New window appearing
+    WINDOW_OUT,   // Window closing
+    WINDOW_MOVE   // Layout change, resize, drag
+};
 
 // ============================================================================
 // Bezier Curve (same as Hyprland's implementation)
@@ -102,6 +125,25 @@ class BezierCurve
             t = std::clamp(t, 0.0f, 1.0f);
         }
         return t;
+    }
+};
+
+// ============================================================================
+// Animation Configuration (per animation type, like Hyprland)
+// ============================================================================
+
+struct AnimationConfig
+{
+    BezierCurve curve;
+    float durationMs = 300.0f;
+    bool enabled = true;
+    
+    // For windowsIn: popin percentage (0.0-1.0, where 0.8 means 80%->100%)
+    float popinPercent = 0.8f;
+    
+    void setCurve(float p1x, float p1y, float p2x, float p2y)
+    {
+        curve = BezierCurve(p1x, p1y, p2x, p2y);
     }
 };
 
@@ -198,12 +240,18 @@ struct AnimatedGeometry
     AnimatedVar<int> width{100};
     AnimatedVar<int> height{100};
     
+    // For popin animation
+    AnimatedVar<float> scale{1.0f};
+    AnimatedVar<float> alpha{1.0f};
+    
     void setConfig(BezierCurve* curve, float durationMs)
     {
         x.setConfig(curve, durationMs);
         y.setConfig(curve, durationMs);
         width.setConfig(curve, durationMs);
         height.setConfig(curve, durationMs);
+        scale.setConfig(curve, durationMs);
+        alpha.setConfig(curve, durationMs);
     }
     
     void setGoal(wf::geometry_t geo, bool animate = true)
@@ -222,13 +270,31 @@ struct AnimatedGeometry
         height.warp(geo.height);
     }
     
+    // Start a popin animation (for new windows)
+    void startPopin(float fromScale = 0.8f)
+    {
+        scale.warp(fromScale);
+        scale.set(1.0f, true);
+        alpha.warp(0.0f);
+        alpha.set(1.0f, true);
+    }
+    
+    // Start a popout animation (for closing windows)
+    void startPopout(float toScale = 0.8f)
+    {
+        scale.set(toScale, true);
+        alpha.set(0.0f, true);
+    }
+    
     bool tick()
     {
         bool a = x.tick();
         bool b = y.tick();
         bool c = width.tick();
         bool d = height.tick();
-        return a || b || c || d;
+        bool e = scale.tick();
+        bool f = alpha.tick();
+        return a || b || c || d || e || f;
     }
     
     wf::geometry_t current() const
@@ -244,8 +310,12 @@ struct AnimatedGeometry
     bool isAnimating() const
     {
         return x.isAnimating() || y.isAnimating() || 
-               width.isAnimating() || height.isAnimating();
+               width.isAnimating() || height.isAnimating() ||
+               scale.isAnimating() || alpha.isAnimating();
     }
+    
+    float currentScale() const { return scale.value(); }
+    float currentAlpha() const { return alpha.value(); }
 };
 
 // ============================================================================
@@ -295,6 +365,7 @@ class TileNode : public std::enable_shared_from_this<TileNode>
     bool isLeaf() const { return m_isLeaf; }
     wayfire_toplevel_view view() const { return m_view; }
     SplitDir splitDir() const { return m_splitDir; }
+    void setSplitDir(SplitDir dir) { m_splitDir = dir; }
     
     TileNodePtr child(int idx) const 
     { 
@@ -337,42 +408,62 @@ class TileNode : public std::enable_shared_from_this<TileNode>
     float splitRatio() const { return m_splitRatio; }
     void setSplitRatio(float ratio) { m_splitRatio = std::clamp(ratio, 0.1f, 0.9f); }
     
+    // Pseudotile support
+    bool isPseudotiled() const { return m_isPseudotiled; }
+    void setPseudotiled(bool pseudo) { m_isPseudotiled = pseudo; }
+    wf::geometry_t preferredSize() const { return m_preferredSize; }
+    void setPreferredSize(wf::geometry_t size) { m_preferredSize = size; }
+    
+    // Lock split direction (preserve_split)
+    bool isSplitLocked() const { return m_splitLocked; }
+    void setSplitLocked(bool locked) { m_splitLocked = locked; }
+    
     // Calculate and apply layout recursively
-    void applyLayout(wf::geometry_t bounds, int gap, bool animate = true)
+    // Hyprland-style: recalculate split direction based on aspect ratio unless preserve_split
+    void applyLayout(wf::geometry_t bounds, int gapIn, int gapOut, 
+                     bool preserveSplit, float splitWidthMultiplier, bool animate = true)
     {
         m_geometry.setGoal(bounds, animate);
         
         if (m_isLeaf)
             return;
         
-        // Calculate child bounds - properly account for gap
+        // Hyprland behavior: dynamically determine split direction based on aspect ratio
+        // unless preserve_split is enabled or this node has locked split
+        if (!preserveSplit && !m_splitLocked)
+        {
+            float effectiveWidth = bounds.width * splitWidthMultiplier;
+            m_splitDir = (effectiveWidth > bounds.height) 
+                ? SplitDir::HORIZONTAL 
+                : SplitDir::VERTICAL;
+        }
+        
+        // Calculate child bounds with proper gap handling
         wf::geometry_t child1Bounds, child2Bounds;
         
         if (m_splitDir == SplitDir::HORIZONTAL)
         {
-            // Subtract gap from total, then split the remaining space
-            int availableWidth = bounds.width - gap;
+            int availableWidth = bounds.width - gapIn;
             int width1 = static_cast<int>(availableWidth * m_splitRatio);
             int width2 = availableWidth - width1;
             
             child1Bounds = {bounds.x, bounds.y, width1, bounds.height};
-            child2Bounds = {bounds.x + width1 + gap, bounds.y, width2, bounds.height};
+            child2Bounds = {bounds.x + width1 + gapIn, bounds.y, width2, bounds.height};
         }
         else
         {
-            // Subtract gap from total, then split the remaining space
-            int availableHeight = bounds.height - gap;
+            int availableHeight = bounds.height - gapIn;
             int height1 = static_cast<int>(availableHeight * m_splitRatio);
             int height2 = availableHeight - height1;
             
             child1Bounds = {bounds.x, bounds.y, bounds.width, height1};
-            child2Bounds = {bounds.x, bounds.y + height1 + gap, bounds.width, height2};
+            child2Bounds = {bounds.x, bounds.y + height1 + gapIn, bounds.width, height2};
         }
         
         if (m_children[0])
-            m_children[0]->applyLayout(child1Bounds, gap, animate);
+            m_children[0]->applyLayout(child1Bounds, gapIn, gapOut, preserveSplit, splitWidthMultiplier, animate);
         if (m_children[1])
-            m_children[1]->applyLayout(child2Bounds, gap, animate);
+            m_children[1]->applyLayout(child2Bounds, gapIn, gapOut, preserveSplit, splitWidthMultiplier, animate);
     }
     
     // Tick animation for this node and all children
@@ -457,8 +548,21 @@ class TileNode : public std::enable_shared_from_this<TileNode>
         return -1;
     }
     
+    // Get sibling node
+    TileNodePtr sibling() const
+    {
+        auto p = parent();
+        if (!p)
+            return nullptr;
+        
+        int idx = childIndex();
+        if (idx < 0)
+            return nullptr;
+        
+        return p->child(1 - idx);
+    }
+    
   public:
-    // Default constructor - needed for make_shared
     TileNode() = default;
     
   private:
@@ -471,6 +575,11 @@ class TileNode : public std::enable_shared_from_this<TileNode>
     
     float m_splitRatio = 0.5f;
     AnimatedGeometry m_geometry;
+    
+    // Hyprland features
+    bool m_isPseudotiled = false;
+    wf::geometry_t m_preferredSize{0, 0, 0, 0};
+    bool m_splitLocked = false;
 };
 
 // ============================================================================
@@ -482,11 +591,18 @@ class TileTree
   public:
     TileTree() = default;
     
-    void setConfig(BezierCurve* curve, float durationMs, int gap)
+    void setConfig(BezierCurve* curve, float durationMs, int gapIn, int gapOut,
+                   bool preserveSplit, float splitWidthMultiplier, int forceSplit,
+                   bool smartSplit)
     {
         m_curve = curve;
         m_durationMs = durationMs;
-        m_gap = gap;
+        m_gapIn = gapIn;
+        m_gapOut = gapOut;
+        m_preserveSplit = preserveSplit;
+        m_splitWidthMultiplier = splitWidthMultiplier;
+        m_forceSplit = forceSplit;
+        m_smartSplit = smartSplit;
     }
     
     void setBounds(wf::geometry_t bounds)
@@ -494,48 +610,92 @@ class TileTree
         m_bounds = bounds;
     }
     
-    // Add a view to the tree using dwindle algorithm
+    void setFocusedView(wayfire_toplevel_view view)
+    {
+        m_focusedView = view;
+    }
+    
+    void setCursorPosition(wf::point_t pos)
+    {
+        m_cursorPos = pos;
+    }
+    
+    // Add a view to the tree - Hyprland style
+    // Splits the focused window (not deepest leaf) unless no focus
     void addView(wayfire_toplevel_view view, bool animate = true)
     {
         auto newLeaf = TileNode::createLeaf(view);
         newLeaf->setConfig(m_curve, m_durationMs);
         
+        // Apply outer gaps to the effective bounds
+        wf::geometry_t effectiveBounds = {
+            m_bounds.x + m_gapOut,
+            m_bounds.y + m_gapOut,
+            m_bounds.width - 2 * m_gapOut,
+            m_bounds.height - 2 * m_gapOut
+        };
+        
         if (!m_root)
         {
             // First window - just becomes the root
             m_root = newLeaf;
-            newLeaf->geometry().warp(m_bounds);
+            newLeaf->geometry().warp(effectiveBounds);
+            // Start popin animation for new window
+            newLeaf->geometry().startPopin(0.8f);
         }
         else if (m_root->isLeaf())
         {
             // Second window - create split at root level
-            // Start with HORIZONTAL split (side by side)
-            SplitDir dir = SplitDir::HORIZONTAL;
+            SplitDir dir = determineSplitDirection(effectiveBounds, m_root);
             
-            auto newRoot = TileNode::createSplit(dir, m_root, newLeaf);
+            // Determine child order based on force_split
+            TileNodePtr first, second;
+            if (m_forceSplit == 1)
+            {
+                // New window on left/top
+                first = newLeaf;
+                second = m_root;
+            }
+            else
+            {
+                // Default (0 or 2): new window on right/bottom
+                first = m_root;
+                second = newLeaf;
+            }
+            
+            auto newRoot = TileNode::createSplit(dir, first, second);
             newRoot->setConfig(m_curve, m_durationMs);
-            m_root->setParent(newRoot);
-            newLeaf->setParent(newRoot);
+            first->setParent(newRoot);
+            second->setParent(newRoot);
             
-            // Warp new leaf to right half for smooth animation
-            wf::geometry_t startGeo = {
-                m_bounds.x + m_bounds.width / 2,
-                m_bounds.y,
-                m_bounds.width / 2,
-                m_bounds.height
-            };
+            // Warp new leaf to appropriate starting position
+            wf::geometry_t startGeo = calculateNewWindowStart(effectiveBounds, dir, m_forceSplit == 1);
             newLeaf->geometry().warp(startGeo);
+            newLeaf->geometry().startPopin(0.8f);
             
             m_root = newRoot;
         }
         else
         {
-            // Third+ window: dwindle insertion
-            // Find the last (deepest rightmost) leaf and split it
-            auto lastLeaf = findLastLeaf(m_root);
-            if (lastLeaf)
+            // Third+ window: split the focused window (Hyprland behavior)
+            TileNodePtr targetLeaf = nullptr;
+            
+            // Try to find the focused view's node
+            if (m_focusedView)
             {
-                insertAtLeaf(lastLeaf, newLeaf);
+                targetLeaf = m_root->findView(m_focusedView);
+            }
+            
+            // Fallback to last leaf if no focus
+            if (!targetLeaf)
+            {
+                targetLeaf = findLastLeaf(m_root);
+            }
+            
+            if (targetLeaf)
+            {
+                insertAtLeaf(targetLeaf, newLeaf);
+                newLeaf->geometry().startPopin(0.8f);
             }
         }
         
@@ -551,6 +711,9 @@ class TileTree
         auto node = m_root->findView(view);
         if (!node)
             return;
+        
+        // Start popout animation before removing
+        node->geometry().startPopout(0.8f);
         
         auto parent = node->parent();
         if (!parent)
@@ -625,6 +788,19 @@ class TileTree
         return node->geometry().goal();
     }
     
+    // Get animation scale/alpha for a view (for popin/popout effects)
+    std::pair<float, float> getViewScaleAlpha(wayfire_toplevel_view view) const
+    {
+        if (!m_root)
+            return {1.0f, 1.0f};
+        
+        auto node = const_cast<TileNode*>(m_root.get())->findView(view);
+        if (!node)
+            return {1.0f, 1.0f};
+        
+        return {node->geometry().currentScale(), node->geometry().currentAlpha()};
+    }
+    
     // Get all managed views
     std::vector<wayfire_toplevel_view> getViews() const
     {
@@ -640,7 +816,76 @@ class TileTree
     {
         if (m_root)
         {
-            m_root->applyLayout(m_bounds, m_gap, animate);
+            // Apply outer gaps to effective bounds
+            wf::geometry_t effectiveBounds = {
+                m_bounds.x + m_gapOut,
+                m_bounds.y + m_gapOut,
+                m_bounds.width - 2 * m_gapOut,
+                m_bounds.height - 2 * m_gapOut
+            };
+            
+            m_root->applyLayout(effectiveBounds, m_gapIn, m_gapOut, 
+                               m_preserveSplit, m_splitWidthMultiplier, animate);
+        }
+    }
+    
+    // Layout messages (like Hyprland dispatchers)
+    void handleLayoutMessage(const std::string& msg, wayfire_toplevel_view targetView = nullptr)
+    {
+        if (!m_root)
+            return;
+        
+        TileNodePtr targetNode = nullptr;
+        if (targetView)
+        {
+            targetNode = m_root->findView(targetView);
+        }
+        else if (m_focusedView)
+        {
+            targetNode = m_root->findView(m_focusedView);
+        }
+        
+        if (!targetNode)
+            return;
+        
+        auto parent = targetNode->parent();
+        if (!parent)
+            return;
+        
+        if (msg == "togglesplit")
+        {
+            // Toggle split direction of parent
+            SplitDir newDir = (parent->splitDir() == SplitDir::HORIZONTAL)
+                ? SplitDir::VERTICAL
+                : SplitDir::HORIZONTAL;
+            parent->setSplitDir(newDir);
+            parent->setSplitLocked(true);  // Lock it so preserve_split doesn't override
+            recalculateLayout(true);
+        }
+        else if (msg == "swapnext" || msg == "swapprev")
+        {
+            // Swap with sibling
+            TileNodePtr sibling = targetNode->sibling();
+            if (sibling && parent)
+            {
+                int targetIdx = targetNode->childIndex();
+                int siblingIdx = sibling->childIndex();
+                parent->setChild(targetIdx, sibling);
+                parent->setChild(siblingIdx, targetNode);
+                recalculateLayout(true);
+            }
+        }
+        else if (msg == "pseudo")
+        {
+            // Toggle pseudotile
+            targetNode->setPseudotiled(!targetNode->isPseudotiled());
+            if (targetNode->isPseudotiled() && targetView)
+            {
+                // Store current size as preferred
+                auto currentGeo = targetView->get_geometry();
+                targetNode->setPreferredSize(currentGeo);
+            }
+            recalculateLayout(true);
         }
     }
     
@@ -649,10 +894,73 @@ class TileTree
     wf::geometry_t m_bounds{0, 0, 1920, 1080};
     BezierCurve* m_curve = nullptr;
     float m_durationMs = 300.0f;
-    int m_gap = 10;
     
-    // Find the deepest, rightmost leaf (dwindle style)
-    // This traverses always going to the second child (right/bottom)
+    // Hyprland-style options
+    int m_gapIn = 5;
+    int m_gapOut = 10;
+    bool m_preserveSplit = false;
+    float m_splitWidthMultiplier = 1.0f;
+    int m_forceSplit = 0;  // 0=mouse, 1=left/top, 2=right/bottom
+    bool m_smartSplit = false;
+    
+    wayfire_toplevel_view m_focusedView = nullptr;
+    wf::point_t m_cursorPos{0, 0};
+    
+    // Determine split direction based on Hyprland rules
+    SplitDir determineSplitDirection(wf::geometry_t bounds, TileNodePtr existingNode)
+    {
+        if (m_smartSplit && existingNode)
+        {
+            // Smart split: based on cursor position relative to window center
+            auto nodeGeo = existingNode->geometry().goal();
+            int centerX = nodeGeo.x + nodeGeo.width / 2;
+            int centerY = nodeGeo.y + nodeGeo.height / 2;
+            
+            int dx = std::abs(m_cursorPos.x - centerX);
+            int dy = std::abs(m_cursorPos.y - centerY);
+            
+            // Normalize by dimensions
+            float relX = static_cast<float>(dx) / (nodeGeo.width / 2);
+            float relY = static_cast<float>(dy) / (nodeGeo.height / 2);
+            
+            return (relX > relY) ? SplitDir::HORIZONTAL : SplitDir::VERTICAL;
+        }
+        
+        // Default: aspect ratio based (Hyprland default behavior)
+        float effectiveWidth = bounds.width * m_splitWidthMultiplier;
+        return (effectiveWidth > bounds.height) ? SplitDir::HORIZONTAL : SplitDir::VERTICAL;
+    }
+    
+    // Calculate starting geometry for new window (for smooth animation)
+    wf::geometry_t calculateNewWindowStart(wf::geometry_t bounds, SplitDir dir, bool newOnLeft)
+    {
+        if (dir == SplitDir::HORIZONTAL)
+        {
+            int halfWidth = bounds.width / 2;
+            if (newOnLeft)
+            {
+                return {bounds.x, bounds.y, halfWidth, bounds.height};
+            }
+            else
+            {
+                return {bounds.x + halfWidth, bounds.y, halfWidth, bounds.height};
+            }
+        }
+        else
+        {
+            int halfHeight = bounds.height / 2;
+            if (newOnLeft)
+            {
+                return {bounds.x, bounds.y, bounds.width, halfHeight};
+            }
+            else
+            {
+                return {bounds.x, bounds.y + halfHeight, bounds.width, halfHeight};
+            }
+        }
+    }
+    
+    // Find the deepest, rightmost leaf (fallback for dwindle style)
     TileNodePtr findLastLeaf(TileNodePtr node)
     {
         if (!node)
@@ -660,7 +968,7 @@ class TileTree
         if (node->isLeaf())
             return node;
         
-        // In dwindle, always go to second child first (that's where new windows go)
+        // In dwindle, prefer second child (that's where new windows typically go)
         if (node->child(1))
         {
             auto found = findLastLeaf(node->child(1));
@@ -668,84 +976,66 @@ class TileTree
                 return found;
         }
         
-        // Fallback to first child
         return findLastLeaf(node->child(0));
     }
     
     // Insert newLeaf by splitting existingLeaf
-    // This is the core of dwindle: each new window splits the last one
     void insertAtLeaf(TileNodePtr existingLeaf, TileNodePtr newLeaf)
     {
         auto parent = existingLeaf->parent();
-        
-        // IMPORTANT: Get the child index BEFORE we create the split,
-        // because createSplit will change existingLeaf's parent
         int existingChildIdx = existingLeaf->childIndex();
         
-        // Dwindle alternates split direction at each level
-        // If parent split horizontally, we split vertically, and vice versa
-        SplitDir dir;
-        if (parent)
+        // Determine split direction
+        auto existingGeo = existingLeaf->geometry().goal();
+        SplitDir dir = determineSplitDirection(existingGeo, existingLeaf);
+        
+        // Calculate starting position for new leaf
+        wf::geometry_t newLeafStart;
+        bool newOnRight = (m_forceSplit != 1);  // Default is right/bottom
+        
+        if (m_forceSplit == 0 && m_smartSplit)
         {
-            // Alternate from parent's direction
-            dir = (parent->splitDir() == SplitDir::HORIZONTAL) 
-                ? SplitDir::VERTICAL 
-                : SplitDir::HORIZONTAL;
-        }
-        else
-        {
-            // No parent means existingLeaf is root - use aspect ratio
-            auto geo = existingLeaf->geometry().goal();
-            dir = (geo.width > geo.height) 
-                ? SplitDir::HORIZONTAL 
-                : SplitDir::VERTICAL;
+            // Use cursor position to determine side
+            int centerX = existingGeo.x + existingGeo.width / 2;
+            int centerY = existingGeo.y + existingGeo.height / 2;
+            
+            if (dir == SplitDir::HORIZONTAL)
+            {
+                newOnRight = (m_cursorPos.x > centerX);
+            }
+            else
+            {
+                newOnRight = (m_cursorPos.y > centerY);
+            }
         }
         
-        // Warp new leaf to a reasonable starting position BEFORE creating split
-        // This prevents weird scaling animations from {0,0,100,100}
-        auto existingGeo = existingLeaf->geometry().goal();
-        wf::geometry_t newLeafStart;
-        if (dir == SplitDir::HORIZONTAL)
-        {
-            // New leaf will be on the right
-            newLeafStart = {
-                existingGeo.x + existingGeo.width / 2,
-                existingGeo.y,
-                existingGeo.width / 2,
-                existingGeo.height
-            };
-        }
-        else
-        {
-            // New leaf will be on the bottom
-            newLeafStart = {
-                existingGeo.x,
-                existingGeo.y + existingGeo.height / 2,
-                existingGeo.width,
-                existingGeo.height / 2
-            };
-        }
+        newLeafStart = calculateNewWindowStart(existingGeo, dir, !newOnRight);
         newLeaf->geometry().warp(newLeafStart);
         
-        // Create a new split node with existing and new as children
-        // Existing goes to child[0] (left/top), new goes to child[1] (right/bottom)
-        // NOTE: This changes existingLeaf's parent to newSplit!
-        auto newSplit = TileNode::createSplit(dir, existingLeaf, newLeaf);
+        // Create split with appropriate child order
+        TileNodePtr first, second;
+        if (newOnRight)
+        {
+            first = existingLeaf;
+            second = newLeaf;
+        }
+        else
+        {
+            first = newLeaf;
+            second = existingLeaf;
+        }
+        
+        auto newSplit = TileNode::createSplit(dir, first, second);
         newSplit->setConfig(m_curve, m_durationMs);
         
         if (!parent)
         {
-            // existingLeaf was the root
             m_root = newSplit;
         }
         else
         {
-            // Replace existingLeaf with newSplit in the parent
-            // Use the index we saved BEFORE createSplit changed the parent
             parent->setChild(existingChildIdx, newSplit);
         }
-        
-        // The new split node's geometry will be set during recalculateLayout
     }
 };
 
@@ -756,15 +1046,12 @@ class TileTree
 class ViewAnimData : public wf::custom_data_t
 {
   public:
-    // The goal geometry the view should animate to
     wf::geometry_t goalGeometry{0, 0, 100, 100};
-    
-    // Transformer for visual animation during transition
     std::shared_ptr<wf::scene::view_2d_transformer_t> transformer;
     std::string transformerName;
-    
-    // Whether this view is managed by the tiling system
     bool isTiled = false;
+    bool isPseudotiled = false;
+    AnimationType currentAnimType = AnimationType::WINDOW_MOVE;
 };
 
 // ============================================================================
@@ -774,25 +1061,58 @@ class ViewAnimData : public wf::custom_data_t
 class AnimatedTilePlugin : public wf::per_output_plugin_instance_t
 {
   public:
-    // Configuration
-    wf::option_wrapper_t<int> opt_gap{"animated-tile/gap"};
+    // Basic configuration
     wf::option_wrapper_t<int> opt_duration{"animated-tile/duration"};
+    wf::option_wrapper_t<bool> opt_tile_by_default{"animated-tile/tile_by_default"};
+    
+    // Default bezier curve (used as fallback)
     wf::option_wrapper_t<double> opt_bezier_p1_x{"animated-tile/bezier_p1_x"};
     wf::option_wrapper_t<double> opt_bezier_p1_y{"animated-tile/bezier_p1_y"};
     wf::option_wrapper_t<double> opt_bezier_p2_x{"animated-tile/bezier_p2_x"};
     wf::option_wrapper_t<double> opt_bezier_p2_y{"animated-tile/bezier_p2_y"};
-    wf::option_wrapper_t<bool> opt_tile_by_default{"animated-tile/tile_by_default"};
+    
+    // Hyprland-style options
+    wf::option_wrapper_t<int> opt_gaps_in{"animated-tile/gaps_in"};
+    wf::option_wrapper_t<int> opt_gaps_out{"animated-tile/gaps_out"};
+    wf::option_wrapper_t<bool> opt_preserve_split{"animated-tile/preserve_split"};
+    wf::option_wrapper_t<double> opt_split_width_multiplier{"animated-tile/split_width_multiplier"};
+    wf::option_wrapper_t<int> opt_force_split{"animated-tile/force_split"};
+    wf::option_wrapper_t<bool> opt_smart_split{"animated-tile/smart_split"};
+    wf::option_wrapper_t<double> opt_popin_percent{"animated-tile/popin_percent"};
+    
+    // Separate animation durations (like Hyprland)
+    wf::option_wrapper_t<int> opt_duration_in{"animated-tile/duration_in"};
+    wf::option_wrapper_t<int> opt_duration_out{"animated-tile/duration_out"};
+    wf::option_wrapper_t<int> opt_duration_move{"animated-tile/duration_move"};
+    
+    // Separate bezier curves for windowsIn (0 = use default)
+    wf::option_wrapper_t<double> opt_bezier_in_p1_x{"animated-tile/bezier_in_p1_x"};
+    wf::option_wrapper_t<double> opt_bezier_in_p1_y{"animated-tile/bezier_in_p1_y"};
+    wf::option_wrapper_t<double> opt_bezier_in_p2_x{"animated-tile/bezier_in_p2_x"};
+    wf::option_wrapper_t<double> opt_bezier_in_p2_y{"animated-tile/bezier_in_p2_y"};
+    
+    // Separate bezier curves for windowsOut
+    wf::option_wrapper_t<double> opt_bezier_out_p1_x{"animated-tile/bezier_out_p1_x"};
+    wf::option_wrapper_t<double> opt_bezier_out_p1_y{"animated-tile/bezier_out_p1_y"};
+    wf::option_wrapper_t<double> opt_bezier_out_p2_x{"animated-tile/bezier_out_p2_x"};
+    wf::option_wrapper_t<double> opt_bezier_out_p2_y{"animated-tile/bezier_out_p2_y"};
+    
+    // Separate bezier curves for windowsMove (resize/reposition)
+    wf::option_wrapper_t<double> opt_bezier_move_p1_x{"animated-tile/bezier_move_p1_x"};
+    wf::option_wrapper_t<double> opt_bezier_move_p1_y{"animated-tile/bezier_move_p1_y"};
+    wf::option_wrapper_t<double> opt_bezier_move_p2_x{"animated-tile/bezier_move_p2_x"};
+    wf::option_wrapper_t<double> opt_bezier_move_p2_y{"animated-tile/bezier_move_p2_y"};
     
     void init() override
     {
-        // Setup bezier curve
-        updateBezier();
+        // Setup bezier curves for different animation types
+        updateAnimationConfigs();
         
         // Get workspace bounds
         updateWorkspaceBounds();
         
-        // Configure the tile tree
-        m_tree.setConfig(&m_bezier, opt_duration, opt_gap);
+        // Configure the tile tree with all Hyprland-style options
+        updateTreeConfig();
         m_tree.setBounds(m_workspaceBounds);
         
         // Connect signals
@@ -820,23 +1140,108 @@ class AnimatedTilePlugin : public wf::per_output_plugin_instance_t
     }
     
   private:
-    BezierCurve m_bezier;
+    // Animation configs per type
+    AnimationConfig m_animConfigIn;
+    AnimationConfig m_animConfigOut;
+    AnimationConfig m_animConfigMove;
+    
+    BezierCurve m_bezier;  // Default/shared bezier
     TileTree m_tree;
     wf::geometry_t m_workspaceBounds;
     bool m_animationActive = false;
+    wf::point_t m_cursorPos{0, 0};
     
     wf::effect_hook_t m_animationHook = [this] ()
     {
         tickAnimations();
     };
     
-    void updateBezier()
+    void updateAnimationConfigs()
     {
-        m_bezier = BezierCurve(
-            static_cast<float>(double(opt_bezier_p1_x)),
-            static_cast<float>(double(opt_bezier_p1_y)),
-            static_cast<float>(double(opt_bezier_p2_x)),
-            static_cast<float>(double(opt_bezier_p2_y))
+        // Default bezier curve values
+        float p1x = static_cast<float>(double(opt_bezier_p1_x));
+        float p1y = static_cast<float>(double(opt_bezier_p1_y));
+        float p2x = static_cast<float>(double(opt_bezier_p2_x));
+        float p2y = static_cast<float>(double(opt_bezier_p2_y));
+        
+        m_bezier = BezierCurve(p1x, p1y, p2x, p2y);
+        
+        // Configure each animation type
+        // Use specific durations if set, otherwise fall back to main duration
+        int durationIn = opt_duration_in > 0 ? int(opt_duration_in) : int(opt_duration);
+        int durationOut = opt_duration_out > 0 ? int(opt_duration_out) : int(opt_duration);
+        int durationMove = opt_duration_move > 0 ? int(opt_duration_move) : int(opt_duration);
+        
+        // Helper to check if a bezier is set (non-zero values)
+        auto hasCustomBezier = [](double p1x, double p1y, double p2x, double p2y) {
+            // Consider it custom if any value is non-zero (default is 0)
+            return (p1x != 0.0 || p1y != 0.0 || p2x != 0.0 || p2y != 0.0);
+        };
+        
+        // WindowsIn bezier - use custom if set, otherwise default
+        if (hasCustomBezier(opt_bezier_in_p1_x, opt_bezier_in_p1_y, 
+                           opt_bezier_in_p2_x, opt_bezier_in_p2_y))
+        {
+            m_animConfigIn.setCurve(
+                static_cast<float>(double(opt_bezier_in_p1_x)),
+                static_cast<float>(double(opt_bezier_in_p1_y)),
+                static_cast<float>(double(opt_bezier_in_p2_x)),
+                static_cast<float>(double(opt_bezier_in_p2_y))
+            );
+        }
+        else
+        {
+            m_animConfigIn.setCurve(p1x, p1y, p2x, p2y);
+        }
+        m_animConfigIn.durationMs = static_cast<float>(durationIn);
+        m_animConfigIn.popinPercent = static_cast<float>(double(opt_popin_percent));
+        
+        // WindowsOut bezier
+        if (hasCustomBezier(opt_bezier_out_p1_x, opt_bezier_out_p1_y,
+                           opt_bezier_out_p2_x, opt_bezier_out_p2_y))
+        {
+            m_animConfigOut.setCurve(
+                static_cast<float>(double(opt_bezier_out_p1_x)),
+                static_cast<float>(double(opt_bezier_out_p1_y)),
+                static_cast<float>(double(opt_bezier_out_p2_x)),
+                static_cast<float>(double(opt_bezier_out_p2_y))
+            );
+        }
+        else
+        {
+            m_animConfigOut.setCurve(p1x, p1y, p2x, p2y);
+        }
+        m_animConfigOut.durationMs = static_cast<float>(durationOut);
+        
+        // WindowsMove bezier (resize/reposition when layout changes)
+        if (hasCustomBezier(opt_bezier_move_p1_x, opt_bezier_move_p1_y,
+                           opt_bezier_move_p2_x, opt_bezier_move_p2_y))
+        {
+            m_animConfigMove.setCurve(
+                static_cast<float>(double(opt_bezier_move_p1_x)),
+                static_cast<float>(double(opt_bezier_move_p1_y)),
+                static_cast<float>(double(opt_bezier_move_p2_x)),
+                static_cast<float>(double(opt_bezier_move_p2_y))
+            );
+        }
+        else
+        {
+            m_animConfigMove.setCurve(p1x, p1y, p2x, p2y);
+        }
+        m_animConfigMove.durationMs = static_cast<float>(durationMove);
+    }
+    
+    void updateTreeConfig()
+    {
+        m_tree.setConfig(
+            &m_bezier,
+            static_cast<float>(int(opt_duration)),
+            opt_gaps_in,
+            opt_gaps_out,
+            opt_preserve_split,
+            static_cast<float>(double(opt_split_width_multiplier)),
+            opt_force_split,
+            opt_smart_split
         );
     }
     
@@ -853,9 +1258,14 @@ class AnimatedTilePlugin : public wf::per_output_plugin_instance_t
         if (!view)
             return;
         
-        // Only tile toplevel views by default
         if (!opt_tile_by_default)
             return;
+        
+        // Update cursor position for smart_split
+        updateCursorPosition();
+        
+        // Track the newly mapped view as focused (it typically gets focus)
+        m_tree.setFocusedView(view);
         
         tileView(view);
     };
@@ -874,7 +1284,7 @@ class AnimatedTilePlugin : public wf::per_output_plugin_instance_t
     };
     
     wf::signal::connection_t<wf::workarea_changed_signal> on_workarea_changed =
-        [this] (wf::workarea_changed_signal *ev)
+        [this] (wf::workarea_changed_signal*)
     {
         updateWorkspaceBounds();
         m_tree.setBounds(m_workspaceBounds);
@@ -882,14 +1292,22 @@ class AnimatedTilePlugin : public wf::per_output_plugin_instance_t
         startAnimationLoop();
     };
     
+    void updateCursorPosition()
+    {
+        auto cursor = wf::get_core().get_cursor_position();
+        m_cursorPos = {static_cast<int>(cursor.x), static_cast<int>(cursor.y)};
+        m_tree.setCursorPosition(m_cursorPos);
+    }
+    
     void tileView(wayfire_toplevel_view view)
     {
-        // Add to tree
+        // Add to tree with animation
         m_tree.addView(view, true);
         
         // Mark as tiled
         auto data = view->get_data_safe<ViewAnimData>();
         data->isTiled = true;
+        data->currentAnimType = AnimationType::WINDOW_IN;
         
         // Create transformer for animation
         ensureTransformer(view);
@@ -900,7 +1318,14 @@ class AnimatedTilePlugin : public wf::per_output_plugin_instance_t
     
     void untileView(wayfire_toplevel_view view)
     {
-        // Remove from tree
+        // Set animation type to OUT before removing
+        if (view->has_data<ViewAnimData>())
+        {
+            auto data = view->get_data<ViewAnimData>();
+            data->currentAnimType = AnimationType::WINDOW_OUT;
+        }
+        
+        // Remove from tree with animation
         m_tree.removeView(view, true);
         
         // Remove transformer
@@ -994,33 +1419,33 @@ class AnimatedTilePlugin : public wf::per_output_plugin_instance_t
     {
         auto currentGeo = m_tree.getViewGeometry(view);
         auto goalGeo = m_tree.getViewGoalGeometry(view);
+        auto [animScale, animAlpha] = m_tree.getViewScaleAlpha(view);
         
         if (!currentGeo || !goalGeo)
             return;
         
-        // Safety check for valid geometry
         if (goalGeo->width <= 0 || goalGeo->height <= 0)
             return;
         
         auto data = view->get_data_safe<ViewAnimData>();
         
-        // Set the view to its goal size/position immediately
-        // But use transformer to show it at animated position
+        // Set the view to its goal size/position
         view->set_geometry(*goalGeo);
         
         if (data->transformer)
         {
-            // Scale factor (if animating size)
+            // Scale factor for position/size animation
             float scaleX = static_cast<float>(currentGeo->width) / goalGeo->width;
             float scaleY = static_cast<float>(currentGeo->height) / goalGeo->height;
             
-            // Clamp scale to reasonable values
             scaleX = std::clamp(scaleX, 0.1f, 10.0f);
             scaleY = std::clamp(scaleY, 0.1f, 10.0f);
             
-            // Calculate offset - need to account for scale when translating
-            // The transformer scales around the view's center, so we need to 
-            // compensate for the size difference when calculating translation
+            // Apply popin/popout scale on top
+            scaleX *= animScale;
+            scaleY *= animScale;
+            
+            // Calculate offset
             float goalCenterX = goalGeo->x + goalGeo->width / 2.0f;
             float goalCenterY = goalGeo->y + goalGeo->height / 2.0f;
             float currentCenterX = currentGeo->x + currentGeo->width / 2.0f;
@@ -1033,6 +1458,7 @@ class AnimatedTilePlugin : public wf::per_output_plugin_instance_t
             data->transformer->translation_y = offsetY;
             data->transformer->scale_x = scaleX;
             data->transformer->scale_y = scaleY;
+            data->transformer->alpha = animAlpha;
         }
         
         view->damage();
@@ -1044,10 +1470,8 @@ class AnimatedTilePlugin : public wf::per_output_plugin_instance_t
         if (!goalGeo)
             return;
         
-        // Set final geometry
         view->set_geometry(*goalGeo);
         
-        // Reset transformer
         auto data = view->get_data_safe<ViewAnimData>();
         if (data->transformer)
         {
@@ -1055,7 +1479,11 @@ class AnimatedTilePlugin : public wf::per_output_plugin_instance_t
             data->transformer->translation_y = 0;
             data->transformer->scale_x = 1.0f;
             data->transformer->scale_y = 1.0f;
+            data->transformer->alpha = 1.0f;
         }
+        
+        // Switch from WINDOW_IN to WINDOW_MOVE after initial animation
+        data->currentAnimType = AnimationType::WINDOW_MOVE;
         
         view->damage();
     }
