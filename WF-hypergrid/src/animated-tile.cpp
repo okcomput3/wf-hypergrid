@@ -1052,6 +1052,7 @@ class ViewAnimData : public wf::custom_data_t
     bool isTiled = false;
     bool isPseudotiled = false;
     AnimationType currentAnimType = AnimationType::WINDOW_MOVE;
+    int workspaceIndex = -1;  // Which workspace tree this view belongs to
 };
 
 // ============================================================================
@@ -1111,14 +1112,11 @@ class AnimatedTilePlugin : public wf::per_output_plugin_instance_t
         // Get workspace bounds
         updateWorkspaceBounds();
         
-        // Configure the tile tree with all Hyprland-style options
-        updateTreeConfig();
-        m_tree.setBounds(m_workspaceBounds);
-        
         // Connect signals
         output->connect(&on_view_mapped);
         output->connect(&on_view_unmapped);
         output->connect(&on_workarea_changed);
+        output->connect(&on_workspace_changed);
         
         // Start animation tick loop
         m_animationActive = false;
@@ -1126,10 +1124,13 @@ class AnimatedTilePlugin : public wf::per_output_plugin_instance_t
     
     void fini() override
     {
-        // Remove all transformers
-        for (auto& view : m_tree.getViews())
+        // Remove all transformers from all trees
+        for (auto& [wsIndex, tree] : m_trees)
         {
-            removeTransformer(view);
+            for (auto& view : tree->getViews())
+            {
+                removeTransformer(view);
+            }
         }
         
         // Stop animation loop
@@ -1146,7 +1147,11 @@ class AnimatedTilePlugin : public wf::per_output_plugin_instance_t
     AnimationConfig m_animConfigMove;
     
     BezierCurve m_bezier;  // Default/shared bezier
-    TileTree m_tree;
+    
+    // Map of workspace coordinates to tile trees
+    // Key is workspace index (y * grid_width + x)
+    std::map<int, std::unique_ptr<TileTree>> m_trees;
+    
     wf::geometry_t m_workspaceBounds;
     bool m_animationActive = false;
     wf::point_t m_cursorPos{0, 0};
@@ -1155,6 +1160,59 @@ class AnimatedTilePlugin : public wf::per_output_plugin_instance_t
     {
         tickAnimations();
     };
+    
+    // Get workspace index from coordinates
+    int workspaceIndex(wf::point_t ws)
+    {
+        auto grid = output->wset()->get_workspace_grid_size();
+        return ws.y * grid.width + ws.x;
+    }
+    
+    // Get workspace index for a view
+    int getViewWorkspaceIndex(wayfire_toplevel_view view)
+    {
+        auto ws = output->wset()->get_view_main_workspace(view);
+        return workspaceIndex(ws);
+    }
+    
+    // Get current workspace index
+    int getCurrentWorkspaceIndex()
+    {
+        auto ws = output->wset()->get_current_workspace();
+        return workspaceIndex(ws);
+    }
+    
+    // Get or create tree for a workspace
+    TileTree* getTreeForWorkspace(int wsIndex)
+    {
+        auto it = m_trees.find(wsIndex);
+        if (it == m_trees.end())
+        {
+            auto tree = std::make_unique<TileTree>();
+            tree->setConfig(
+                &m_bezier,
+                static_cast<float>(int(opt_duration)),
+                opt_gaps_in,
+                opt_gaps_out,
+                opt_preserve_split,
+                static_cast<float>(double(opt_split_width_multiplier)),
+                opt_force_split,
+                opt_smart_split
+            );
+            tree->setBounds(m_workspaceBounds);
+            auto ptr = tree.get();
+            m_trees[wsIndex] = std::move(tree);
+            return ptr;
+        }
+        return it->second.get();
+    }
+    
+    // Get tree for a view (based on view's workspace)
+    TileTree* getTreeForView(wayfire_toplevel_view view)
+    {
+        int wsIndex = getViewWorkspaceIndex(view);
+        return getTreeForWorkspace(wsIndex);
+    }
     
     void updateAnimationConfigs()
     {
@@ -1233,21 +1291,30 @@ class AnimatedTilePlugin : public wf::per_output_plugin_instance_t
     
     void updateTreeConfig()
     {
-        m_tree.setConfig(
-            &m_bezier,
-            static_cast<float>(int(opt_duration)),
-            opt_gaps_in,
-            opt_gaps_out,
-            opt_preserve_split,
-            static_cast<float>(double(opt_split_width_multiplier)),
-            opt_force_split,
-            opt_smart_split
-        );
+        // Update config for all existing trees
+        for (auto& [wsIndex, tree] : m_trees)
+        {
+            tree->setConfig(
+                &m_bezier,
+                static_cast<float>(int(opt_duration)),
+                opt_gaps_in,
+                opt_gaps_out,
+                opt_preserve_split,
+                static_cast<float>(double(opt_split_width_multiplier)),
+                opt_force_split,
+                opt_smart_split
+            );
+        }
     }
     
     void updateWorkspaceBounds()
     {
         m_workspaceBounds = output->workarea->get_workarea();
+        // Update bounds for all trees
+        for (auto& [wsIndex, tree] : m_trees)
+        {
+            tree->setBounds(m_workspaceBounds);
+        }
     }
     
     // Signal handlers
@@ -1264,10 +1331,15 @@ class AnimatedTilePlugin : public wf::per_output_plugin_instance_t
         // Update cursor position for smart_split
         updateCursorPosition();
         
-        // Track the newly mapped view as focused (it typically gets focus)
-        m_tree.setFocusedView(view);
+        // Use the CURRENT workspace for new windows, not the view's reported workspace
+        // (which may be incorrect for newly mapped windows)
+        int wsIndex = getCurrentWorkspaceIndex();
+        auto tree = getTreeForWorkspace(wsIndex);
         
-        tileView(view);
+        // Track the newly mapped view as focused (it typically gets focus)
+        tree->setFocusedView(view);
+        
+        tileView(view, wsIndex);
     };
     
     wf::signal::connection_t<wf::view_unmapped_signal> on_view_unmapped =
@@ -1277,9 +1349,29 @@ class AnimatedTilePlugin : public wf::per_output_plugin_instance_t
         if (!view)
             return;
         
-        if (m_tree.hasView(view))
+        // Get the workspace index from the view's stored data
+        if (view->has_data<ViewAnimData>())
         {
-            untileView(view);
+            auto data = view->get_data<ViewAnimData>();
+            if (data->isTiled && data->workspaceIndex >= 0)
+            {
+                auto it = m_trees.find(data->workspaceIndex);
+                if (it != m_trees.end() && it->second->hasView(view))
+                {
+                    untileView(view, it->second.get());
+                    return;
+                }
+            }
+        }
+        
+        // Fallback: search all trees for this view
+        for (auto& [wsIndex, tree] : m_trees)
+        {
+            if (tree->hasView(view))
+            {
+                untileView(view, tree.get());
+                return;
+            }
         }
     };
     
@@ -1287,27 +1379,73 @@ class AnimatedTilePlugin : public wf::per_output_plugin_instance_t
         [this] (wf::workarea_changed_signal*)
     {
         updateWorkspaceBounds();
-        m_tree.setBounds(m_workspaceBounds);
-        m_tree.recalculateLayout(true);
+        // Recalculate layout for all trees
+        for (auto& [wsIndex, tree] : m_trees)
+        {
+            tree->setBounds(m_workspaceBounds);
+            tree->recalculateLayout(true);
+        }
         startAnimationLoop();
+    };
+    
+    // Handle workspace switches - apply correct geometry to views on new workspace
+    wf::signal::connection_t<wf::workspace_changed_signal> on_workspace_changed =
+        [this] (wf::workspace_changed_signal*)
+    {
+        // When switching workspaces, immediately apply final geometry
+        // to all views on the new current workspace (no animation)
+        int currentWs = getCurrentWorkspaceIndex();
+        auto it = m_trees.find(currentWs);
+        if (it != m_trees.end())
+        {
+            for (auto& view : it->second->getViews())
+            {
+                auto goalGeo = it->second->getViewGoalGeometry(view);
+                if (goalGeo)
+                {
+                    view->set_geometry(*goalGeo);
+                    
+                    // Reset transformer
+                    auto data = view->get_data_safe<ViewAnimData>();
+                    if (data->transformer)
+                    {
+                        data->transformer->translation_x = 0;
+                        data->transformer->translation_y = 0;
+                        data->transformer->scale_x = 1.0f;
+                        data->transformer->scale_y = 1.0f;
+                        data->transformer->alpha = 1.0f;
+                    }
+                    view->damage();
+                }
+            }
+        }
     };
     
     void updateCursorPosition()
     {
         auto cursor = wf::get_core().get_cursor_position();
         m_cursorPos = {static_cast<int>(cursor.x), static_cast<int>(cursor.y)};
-        m_tree.setCursorPosition(m_cursorPos);
+        // Update cursor position for current workspace tree
+        int wsIndex = getCurrentWorkspaceIndex();
+        if (m_trees.count(wsIndex))
+        {
+            m_trees[wsIndex]->setCursorPosition(m_cursorPos);
+        }
     }
     
-    void tileView(wayfire_toplevel_view view)
+    void tileView(wayfire_toplevel_view view, int wsIndex)
     {
-        // Add to tree with animation
-        m_tree.addView(view, true);
+        // Get the tree for this workspace
+        auto tree = getTreeForWorkspace(wsIndex);
         
-        // Mark as tiled
+        // Add to tree with animation
+        tree->addView(view, true);
+        
+        // Mark as tiled and store workspace index
         auto data = view->get_data_safe<ViewAnimData>();
         data->isTiled = true;
         data->currentAnimType = AnimationType::WINDOW_IN;
+        data->workspaceIndex = wsIndex;
         
         // Create transformer for animation
         ensureTransformer(view);
@@ -1316,7 +1454,7 @@ class AnimatedTilePlugin : public wf::per_output_plugin_instance_t
         startAnimationLoop();
     }
     
-    void untileView(wayfire_toplevel_view view)
+    void untileView(wayfire_toplevel_view view, TileTree* tree)
     {
         // Set animation type to OUT before removing
         if (view->has_data<ViewAnimData>())
@@ -1326,7 +1464,7 @@ class AnimatedTilePlugin : public wf::per_output_plugin_instance_t
         }
         
         // Remove from tree with animation
-        m_tree.removeView(view, true);
+        tree->removeView(view, true);
         
         // Remove transformer
         removeTransformer(view);
@@ -1338,7 +1476,7 @@ class AnimatedTilePlugin : public wf::per_output_plugin_instance_t
         }
         
         // Continue animation for remaining views
-        if (!m_tree.isEmpty())
+        if (!tree->isEmpty())
         {
             startAnimationLoop();
         }
@@ -1392,20 +1530,37 @@ class AnimatedTilePlugin : public wf::per_output_plugin_instance_t
     
     void tickAnimations()
     {
-        bool stillAnimating = m_tree.tickAnimations();
+        bool stillAnimating = false;
         
-        // Apply current animated geometry to each view
-        for (auto& view : m_tree.getViews())
+        // Only tick and apply geometry for the CURRENT workspace's tree
+        // Other workspaces' views should not be touched
+        int currentWs = getCurrentWorkspaceIndex();
+        
+        // Tick all trees to keep animations progressing
+        for (auto& [wsIndex, tree] : m_trees)
         {
-            applyAnimatedGeometry(view);
+            stillAnimating |= tree->tickAnimations();
+        }
+        
+        // But only apply geometry to views on the current workspace
+        auto it = m_trees.find(currentWs);
+        if (it != m_trees.end())
+        {
+            for (auto& view : it->second->getViews())
+            {
+                applyAnimatedGeometry(view, it->second.get());
+            }
         }
         
         if (!stillAnimating)
         {
-            // Animation complete - apply final geometry and remove transformers
-            for (auto& view : m_tree.getViews())
+            // Animation complete - finalize geometry only for current workspace
+            if (it != m_trees.end())
             {
-                finalizeViewGeometry(view);
+                for (auto& view : it->second->getViews())
+                {
+                    finalizeViewGeometry(view, it->second.get());
+                }
             }
             stopAnimationLoop();
         }
@@ -1415,11 +1570,11 @@ class AnimatedTilePlugin : public wf::per_output_plugin_instance_t
         }
     }
     
-    void applyAnimatedGeometry(wayfire_toplevel_view view)
+    void applyAnimatedGeometry(wayfire_toplevel_view view, TileTree* tree)
     {
-        auto currentGeo = m_tree.getViewGeometry(view);
-        auto goalGeo = m_tree.getViewGoalGeometry(view);
-        auto [animScale, animAlpha] = m_tree.getViewScaleAlpha(view);
+        auto currentGeo = tree->getViewGeometry(view);
+        auto goalGeo = tree->getViewGoalGeometry(view);
+        auto [animScale, animAlpha] = tree->getViewScaleAlpha(view);
         
         if (!currentGeo || !goalGeo)
             return;
@@ -1464,9 +1619,9 @@ class AnimatedTilePlugin : public wf::per_output_plugin_instance_t
         view->damage();
     }
     
-    void finalizeViewGeometry(wayfire_toplevel_view view)
+    void finalizeViewGeometry(wayfire_toplevel_view view, TileTree* tree)
     {
-        auto goalGeo = m_tree.getViewGoalGeometry(view);
+        auto goalGeo = tree->getViewGoalGeometry(view);
         if (!goalGeo)
             return;
         
