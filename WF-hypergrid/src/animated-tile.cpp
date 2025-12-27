@@ -21,6 +21,7 @@
  * - Split at focused window (not always deepest leaf)
  * - pseudotile: Windows keep preferred size within tile
  * - Drag-and-drop window swapping in tile hierarchy
+ * - max_windows_per_workspace: Overflow to next workspace when full
  */
 
 #include <wayfire/per-output-plugin.hpp>
@@ -506,40 +507,40 @@ class TileNode : public std::enable_shared_from_this<TileNode>
         return nullptr;
     }
     
-    // Find leaf node at a specific point
-// Find leaf node at a specific point - use GOAL geometry, not current
-TileNodePtr findNodeAtPoint(wf::point_t point)
-{
-    // Use goal geometry instead of current - this is where the tile actually IS
-    auto geo = m_geometry.goal();
-    
-    // Check if point is within this node's bounds
-    if (point.x < geo.x || point.x >= geo.x + geo.width ||
-        point.y < geo.y || point.y >= geo.y + geo.height)
+    // Find leaf node at a specific point - use GOAL geometry, not current
+    TileNodePtr findNodeAtPoint(wf::point_t point)
     {
-        return nullptr;
-    }
-    
-    // If leaf, return this node
-    if (m_isLeaf)
+        // Use goal geometry instead of current - this is where the tile actually IS
+        auto geo = m_geometry.goal();
+        
+        // Check if point is within this node's bounds
+        if (point.x < geo.x || point.x >= geo.x + geo.width ||
+            point.y < geo.y || point.y >= geo.y + geo.height)
+        {
+            return nullptr;
+        }
+        
+        // If leaf, return this node
+        if (m_isLeaf)
+            return shared_from_this();
+        
+        // Check children
+        if (m_children[0])
+        {
+            auto found = m_children[0]->findNodeAtPoint(point);
+            if (found)
+                return found;
+        }
+        if (m_children[1])
+        {
+            auto found = m_children[1]->findNodeAtPoint(point);
+            if (found)
+                return found;
+        }
+        
         return shared_from_this();
-    
-    // Check children
-    if (m_children[0])
-    {
-        auto found = m_children[0]->findNodeAtPoint(point);
-        if (found)
-            return found;
-    }
-    if (m_children[1])
-    {
-        auto found = m_children[1]->findNodeAtPoint(point);
-        if (found)
-            return found;
     }
     
-    return shared_from_this();
-}
     // Collect all leaf views
     void collectViews(std::vector<wayfire_toplevel_view>& out)
     {
@@ -656,6 +657,14 @@ class TileTree
     void setCursorPosition(wf::point_t pos)
     {
         m_cursorPos = pos;
+    }
+    
+    // Get the current window count
+    int getWindowCount() const
+    {
+        if (!m_root)
+            return 0;
+        return m_root->countLeaves();
     }
     
     // Add a view to the tree - Hyprland style
@@ -884,45 +893,31 @@ class TileTree
     }
     
     // Swap two leaf nodes in the tree (swap their views)
-// Swap two leaf nodes in the tree (swap their views)
-void swapNodes(TileNodePtr nodeA, TileNodePtr nodeB)
-{
-    if (!nodeA || !nodeB || !nodeA->isLeaf() || !nodeB->isLeaf())
-        return;
-    
-    if (nodeA == nodeB)
-        return;
-    
-    // Get views and their current geometries
-    auto viewA = nodeA->view();
-    auto viewB = nodeB->view();
-    auto geoA = nodeA->geometry().goal();
-    auto geoB = nodeB->geometry().goal();
-    
-    // Swap the views between the two leaf nodes
-    nodeA->setView(viewB);
-    nodeB->setView(viewA);
-    
-    // Warp the geometry to start animation from swapped positions
-    // viewB is now in nodeA, so nodeA's geometry should animate FROM geoB
-    // viewA is now in nodeB, so nodeB's geometry should animate FROM geoA
-    // But we want the views to animate, not the nodes...
-    
-    // Actually, the nodes stay in place, views swap.
-    // So we need to set the views to their NEW goal positions immediately,
-    // but have them animate visually from their OLD positions.
-    
-    // The animation system animates the NODE geometry, not the view.
-    // After swap: viewB is in nodeA (should be at geoA), viewA is in nodeB (should be at geoB)
-    // The views need to visually move from old position to new position.
-    
-    // Force immediate application - no animation for the swap itself
-    // The views just teleport to their new positions
-    if (viewA)
-        viewA->set_geometry(geoB);
-    if (viewB)
-        viewB->set_geometry(geoA);
-}
+    void swapNodes(TileNodePtr nodeA, TileNodePtr nodeB)
+    {
+        if (!nodeA || !nodeB || !nodeA->isLeaf() || !nodeB->isLeaf())
+            return;
+        
+        if (nodeA == nodeB)
+            return;
+        
+        // Get views and their current geometries
+        auto viewA = nodeA->view();
+        auto viewB = nodeB->view();
+        auto geoA = nodeA->geometry().goal();
+        auto geoB = nodeB->geometry().goal();
+        
+        // Swap the views between the two leaf nodes
+        nodeA->setView(viewB);
+        nodeB->setView(viewA);
+        
+        // Force immediate application - no animation for the swap itself
+        // The views just teleport to their new positions
+        if (viewA)
+            viewA->set_geometry(geoB);
+        if (viewB)
+            viewB->set_geometry(geoA);
+    }
     
     // Layout messages (like Hyprland dispatchers)
     void handleLayoutMessage(const std::string& msg, wayfire_toplevel_view targetView = nullptr)
@@ -1213,6 +1208,9 @@ class AnimatedTilePlugin : public wf::per_output_plugin_instance_t
     wf::option_wrapper_t<bool> opt_enable_drag_swap{"animated-tile/enable_drag_swap"};
     wf::option_wrapper_t<int> opt_drag_threshold{"animated-tile/drag_threshold"};
     
+    // Max windows per workspace (0 = unlimited)
+    wf::option_wrapper_t<int> opt_max_windows_per_workspace{"animated-tile/max_windows_per_workspace"};
+    
     // Separate animation durations (like Hyprland)
     wf::option_wrapper_t<int> opt_duration_in{"animated-tile/duration_in"};
     wf::option_wrapper_t<int> opt_duration_out{"animated-tile/duration_out"};
@@ -1262,30 +1260,30 @@ class AnimatedTilePlugin : public wf::per_output_plugin_instance_t
         m_animationActive = false;
     }
     
-void fini() override
-{
-    // End any active grab
-    end_grab();
-    
-    // Remove all transformers from all trees
-    for (auto& [wsIndex, tree] : m_trees)
+    void fini() override
     {
-        for (auto& view : tree->getViews())
+        // End any active grab
+        end_grab();
+        
+        // Remove all transformers from all trees
+        for (auto& [wsIndex, tree] : m_trees)
         {
-            removeTransformer(view);
+            for (auto& view : tree->getViews())
+            {
+                removeTransformer(view);
+            }
         }
+        
+        // Stop animation loop
+        if (m_animationActive)
+        {
+            output->render->rem_effect(&m_animationHook);
+        }
+        
+        // Disconnect core signals
+        on_pointer_motion.disconnect();
+        on_pointer_button.disconnect();
     }
-    
-    // Stop animation loop
-    if (m_animationActive)
-    {
-        output->render->rem_effect(&m_animationHook);
-    }
-    
-    // Disconnect core signals
-    on_pointer_motion.disconnect();
-    on_pointer_button.disconnect();
-}
     
   private:
     // Animation configs per type
@@ -1318,6 +1316,20 @@ void fini() override
         return ws.y * grid.width + ws.x;
     }
     
+    // Get workspace coordinates from index
+    wf::point_t workspaceCoords(int index)
+    {
+        auto grid = output->wset()->get_workspace_grid_size();
+        return {index % grid.width, index / grid.width};
+    }
+    
+    // Get total number of workspaces
+    int getTotalWorkspaces()
+    {
+        auto grid = output->wset()->get_workspace_grid_size();
+        return grid.width * grid.height;
+    }
+    
     // Get workspace index for a view
     int getViewWorkspaceIndex(wayfire_toplevel_view view)
     {
@@ -1330,6 +1342,43 @@ void fini() override
     {
         auto ws = output->wset()->get_current_workspace();
         return workspaceIndex(ws);
+    }
+    
+    // Find the next workspace with available space
+    // Returns -1 if all workspaces are full
+    int findNextAvailableWorkspace(int startFromIndex)
+    {
+        int maxWindows = opt_max_windows_per_workspace;
+        if (maxWindows <= 0)
+        {
+            // Unlimited - just use the starting workspace
+            return startFromIndex;
+        }
+        
+        int totalWorkspaces = getTotalWorkspaces();
+        
+        // First, check the starting workspace
+        auto startTree = getTreeForWorkspace(startFromIndex);
+        if (startTree->getWindowCount() < maxWindows)
+        {
+            return startFromIndex;
+        }
+        
+        // Search through all workspaces starting from the next one
+        for (int i = 1; i < totalWorkspaces; i++)
+        {
+            int wsIndex = (startFromIndex + i) % totalWorkspaces;
+            auto tree = getTreeForWorkspace(wsIndex);
+            
+            if (tree->getWindowCount() < maxWindows)
+            {
+                return wsIndex;
+            }
+        }
+        
+        // All workspaces are full - return -1 to indicate overflow
+        // Or we could fall back to current workspace (user's choice)
+        return -1;
     }
     
     // Get or create tree for a workspace
@@ -1481,15 +1530,40 @@ void fini() override
         // Update cursor position for smart_split
         updateCursorPosition();
         
-        // Use the CURRENT workspace for new windows, not the view's reported workspace
-        // (which may be incorrect for newly mapped windows)
-        int wsIndex = getCurrentWorkspaceIndex();
-        auto tree = getTreeForWorkspace(wsIndex);
+        // Start from the current workspace
+        int currentWsIndex = getCurrentWorkspaceIndex();
+        
+        // Find an available workspace (respecting max_windows_per_workspace)
+        int targetWsIndex = findNextAvailableWorkspace(currentWsIndex);
+        
+        if (targetWsIndex < 0)
+        {
+            // All workspaces are full - fall back to current workspace anyway
+            // (The user has more windows than workspace capacity allows)
+            targetWsIndex = currentWsIndex;
+        }
+        
+        // Get the tree for the target workspace
+        auto tree = getTreeForWorkspace(targetWsIndex);
         
         // Track the newly mapped view as focused (it typically gets focus)
         tree->setFocusedView(view);
         
-        tileView(view, wsIndex);
+        // If we're placing on a different workspace, move the view there 
+        // and switch to that workspace so the user sees the new window
+        if (targetWsIndex != currentWsIndex)
+        {
+            auto targetCoords = workspaceCoords(targetWsIndex);
+            
+            // First, switch the user's view to the target workspace
+            output->wset()->request_workspace(targetCoords);
+            
+            // The view will be on the current workspace initially, 
+            // but since we're switching workspaces, we need to move it
+            output->wset()->move_to_workspace(view, targetCoords);
+        }
+        
+        tileView(view, targetWsIndex);
     };
     
     wf::signal::connection_t<wf::view_unmapped_signal> on_view_unmapped =
@@ -1605,196 +1679,192 @@ void fini() override
         }
     };
     
+    // ============================================================================
+    // Input Grab for Drag-to-Swap
+    // ============================================================================
 
-
-// In the private section of AnimatedTilePlugin, replace the drag state and handlers with:
-
-// ============================================================================
-// Input Grab for Drag-to-Swap
-// ============================================================================
-
-class TileDragGrab : public wf::pointer_interaction_t
-{
-  public:
-    AnimatedTilePlugin* plugin;
-    wayfire_toplevel_view dragged_view;
-    TileNodePtr dragged_node;
-    TileTree* tree;
-    wf::point_t start_cursor;
-    int drag_threshold;
-    bool threshold_exceeded = false;
-    
-    void handle_pointer_button(const wlr_pointer_button_event& event) override
+    class TileDragGrab : public wf::pointer_interaction_t
     {
-        if (event.state == WLR_BUTTON_RELEASED)
-        {
-            plugin->complete_drag(threshold_exceeded);
-            plugin->end_grab();
-        }
-    }
-    
-    void handle_pointer_motion(wf::pointf_t pointer_position, uint32_t time_ms) override
-    {
-        wf::point_t cursor = {
-            static_cast<int>(pointer_position.x),
-            static_cast<int>(pointer_position.y)
-        };
+      public:
+        AnimatedTilePlugin* plugin;
+        wayfire_toplevel_view dragged_view;
+        TileNodePtr dragged_node;
+        TileTree* tree;
+        wf::point_t start_cursor;
+        int drag_threshold;
+        bool threshold_exceeded = false;
         
-        if (!threshold_exceeded)
+        void handle_pointer_button(const wlr_pointer_button_event& event) override
         {
-            int dx = std::abs(cursor.x - start_cursor.x);
-            int dy = std::abs(cursor.y - start_cursor.y);
-            
-            if (dx >= drag_threshold || dy >= drag_threshold)
+            if (event.state == WLR_BUTTON_RELEASED)
             {
-                threshold_exceeded = true;
+                plugin->complete_drag(threshold_exceeded);
+                plugin->end_grab();
             }
         }
         
-        if (threshold_exceeded && tree)
+        void handle_pointer_motion(wf::pointf_t pointer_position, uint32_t time_ms) override
         {
-            tree->setCursorPosition(cursor);
-            plugin->update_drop_target(cursor);
+            wf::point_t cursor = {
+                static_cast<int>(pointer_position.x),
+                static_cast<int>(pointer_position.y)
+            };
+            
+            if (!threshold_exceeded)
+            {
+                int dx = std::abs(cursor.x - start_cursor.x);
+                int dy = std::abs(cursor.y - start_cursor.y);
+                
+                if (dx >= drag_threshold || dy >= drag_threshold)
+                {
+                    threshold_exceeded = true;
+                }
+            }
+            
+            if (threshold_exceeded && tree)
+            {
+                tree->setCursorPosition(cursor);
+                plugin->update_drop_target(cursor);
+            }
         }
-    }
-    
-    void handle_pointer_axis(const wlr_pointer_axis_event& event) override
-    {
-        // Ignore scroll during drag
-    }
-};
-
-std::unique_ptr<wf::input_grab_t> m_grab;
-std::unique_ptr<TileDragGrab> m_drag_impl;
-TileNodePtr m_currentDropTarget;
-int m_sourceWorkspaceIndex = -1;
-
-void start_grab(wayfire_toplevel_view view, TileNodePtr node, TileTree* tree, 
-                wf::point_t cursor, int threshold)
-{
-    m_drag_impl = std::make_unique<TileDragGrab>();
-    m_drag_impl->plugin = this;
-    m_drag_impl->dragged_view = view;
-    m_drag_impl->dragged_node = node;
-    m_drag_impl->tree = tree;
-    m_drag_impl->start_cursor = cursor;
-    m_drag_impl->drag_threshold = threshold;
-    m_drag_impl->threshold_exceeded = false;
-    
-    m_grab = std::make_unique<wf::input_grab_t>("animated-tile", output, nullptr, m_drag_impl.get(), nullptr);
-    m_grab->grab_input(wf::scene::layer::OVERLAY);
-    
-    m_currentDropTarget = nullptr;
-}
-
-void end_grab()
-{
-    if (m_grab)
-    {
-        m_grab->ungrab_input();
-        m_grab.reset();
-    }
-    m_drag_impl.reset();
-    m_currentDropTarget = nullptr;
-    m_sourceWorkspaceIndex = -1;
-}
-
-void update_drop_target(wf::point_t cursor)
-{
-    if (!m_drag_impl || !m_drag_impl->tree)
-        return;
-    
-    auto targetNode = m_drag_impl->tree->findNodeAtPoint(cursor);
-    
-    if (targetNode && targetNode->isLeaf() && 
-        targetNode != m_drag_impl->dragged_node &&
-        targetNode->view())
-    {
-        if (m_currentDropTarget != targetNode)
+        
+        void handle_pointer_axis(const wlr_pointer_axis_event& event) override
         {
-            m_currentDropTarget = targetNode;
+            // Ignore scroll during drag
+        }
+    };
+
+    std::unique_ptr<wf::input_grab_t> m_grab;
+    std::unique_ptr<TileDragGrab> m_drag_impl;
+    TileNodePtr m_currentDropTarget;
+    int m_sourceWorkspaceIndex = -1;
+
+    void start_grab(wayfire_toplevel_view view, TileNodePtr node, TileTree* tree, 
+                    wf::point_t cursor, int threshold)
+    {
+        m_drag_impl = std::make_unique<TileDragGrab>();
+        m_drag_impl->plugin = this;
+        m_drag_impl->dragged_view = view;
+        m_drag_impl->dragged_node = node;
+        m_drag_impl->tree = tree;
+        m_drag_impl->start_cursor = cursor;
+        m_drag_impl->drag_threshold = threshold;
+        m_drag_impl->threshold_exceeded = false;
+        
+        m_grab = std::make_unique<wf::input_grab_t>("animated-tile", output, nullptr, m_drag_impl.get(), nullptr);
+        m_grab->grab_input(wf::scene::layer::OVERLAY);
+        
+        m_currentDropTarget = nullptr;
+    }
+
+    void end_grab()
+    {
+        if (m_grab)
+        {
+            m_grab->ungrab_input();
+            m_grab.reset();
+        }
+        m_drag_impl.reset();
+        m_currentDropTarget = nullptr;
+        m_sourceWorkspaceIndex = -1;
+    }
+
+    void update_drop_target(wf::point_t cursor)
+    {
+        if (!m_drag_impl || !m_drag_impl->tree)
+            return;
+        
+        auto targetNode = m_drag_impl->tree->findNodeAtPoint(cursor);
+        
+        if (targetNode && targetNode->isLeaf() && 
+            targetNode != m_drag_impl->dragged_node &&
+            targetNode->view())
+        {
+            if (m_currentDropTarget != targetNode)
+            {
+                m_currentDropTarget = targetNode;
+                output->render->damage_whole();
+            }
+        }
+        else if (m_currentDropTarget)
+        {
+            m_currentDropTarget = nullptr;
             output->render->damage_whole();
         }
     }
-    else if (m_currentDropTarget)
+
+    void complete_drag(bool did_drag)
     {
-        m_currentDropTarget = nullptr;
+        if (!m_drag_impl)
+            return;
+        
+        if (!did_drag)
+        {
+            // Didn't drag far enough - just cancel
+            output->render->damage_whole();
+            return;
+        }
+        
+        auto cursor = wf::get_core().get_cursor_position();
+        wf::point_t cursor_pt = {static_cast<int>(cursor.x), static_cast<int>(cursor.y)};
+        
+        if (!m_drag_impl->tree)
+            return;
+        
+        auto dropTarget = m_drag_impl->tree->findNodeAtPoint(cursor_pt);
+        
+        if (dropTarget && dropTarget->isLeaf() && 
+            dropTarget != m_drag_impl->dragged_node &&
+            dropTarget->view() && 
+            dropTarget->view() != m_drag_impl->dragged_view)
+        {
+            // Valid drop target - swap the windows
+            m_drag_impl->tree->swapNodes(m_drag_impl->dragged_node, dropTarget);
+            startAnimationLoop();
+        }
+        
         output->render->damage_whole();
     }
-}
 
-void complete_drag(bool did_drag)
-{
-    if (!m_drag_impl)
-        return;
-    
-    if (!did_drag)
+    // Replace the on_move_request handler with this:
+    wf::signal::connection_t<wf::view_move_request_signal> on_move_request =
+        [this] (wf::view_move_request_signal *ev)
     {
-        // Didn't drag far enough - just cancel
-        output->render->damage_whole();
-        return;
-    }
-    
-    auto cursor = wf::get_core().get_cursor_position();
-    wf::point_t cursor_pt = {static_cast<int>(cursor.x), static_cast<int>(cursor.y)};
-    
-    if (!m_drag_impl->tree)
-        return;
-    
-    auto dropTarget = m_drag_impl->tree->findNodeAtPoint(cursor_pt);
-    
-    if (dropTarget && dropTarget->isLeaf() && 
-        dropTarget != m_drag_impl->dragged_node &&
-        dropTarget->view() && 
-        dropTarget->view() != m_drag_impl->dragged_view)
-    {
-        // Valid drop target - swap the windows
-        m_drag_impl->tree->swapNodes(m_drag_impl->dragged_node, dropTarget);
-        startAnimationLoop();
-    }
-    
-    output->render->damage_whole();
-}
-
-// Replace the on_move_request handler with this:
-wf::signal::connection_t<wf::view_move_request_signal> on_move_request =
-    [this] (wf::view_move_request_signal *ev)
-{
-    if (!opt_enable_drag_swap)
-        return;
-    
-    auto view = wf::toplevel_cast(ev->view);
-    if (!view)
-        return;
-    
-    // Check if this view is tiled
-    if (!view->has_data<ViewAnimData>())
-        return;
-    
-    auto data = view->get_data<ViewAnimData>();
-    if (!data->isTiled || data->workspaceIndex < 0)
-        return;
-    
-    auto it = m_trees.find(data->workspaceIndex);
-    if (it == m_trees.end())
-        return;
-    
-    auto tree = it->second.get();
-    auto node = tree->getNodeForView(view);
-    if (!node)
-        return;
-    
-    // Get cursor position
-    auto cursor = wf::get_core().get_cursor_position();
-    wf::point_t cursor_pt = {static_cast<int>(cursor.x), static_cast<int>(cursor.y)};
-    
-    int threshold = opt_drag_threshold > 0 ? int(opt_drag_threshold) : 10;
-    
-    m_sourceWorkspaceIndex = data->workspaceIndex;
-    
-    // Start the input grab
-    start_grab(view, node, tree, cursor_pt, threshold);
-};
+        if (!opt_enable_drag_swap)
+            return;
+        
+        auto view = wf::toplevel_cast(ev->view);
+        if (!view)
+            return;
+        
+        // Check if this view is tiled
+        if (!view->has_data<ViewAnimData>())
+            return;
+        
+        auto data = view->get_data<ViewAnimData>();
+        if (!data->isTiled || data->workspaceIndex < 0)
+            return;
+        
+        auto it = m_trees.find(data->workspaceIndex);
+        if (it == m_trees.end())
+            return;
+        
+        auto tree = it->second.get();
+        auto node = tree->getNodeForView(view);
+        if (!node)
+            return;
+        
+        // Get cursor position
+        auto cursor = wf::get_core().get_cursor_position();
+        wf::point_t cursor_pt = {static_cast<int>(cursor.x), static_cast<int>(cursor.y)};
+        
+        int threshold = opt_drag_threshold > 0 ? int(opt_drag_threshold) : 10;
+        
+        m_sourceWorkspaceIndex = data->workspaceIndex;
+        
+        // Start the input grab
+        start_grab(view, node, tree, cursor_pt, threshold);
+    };
     
     // Handle pointer motion during drag
     wf::signal::connection_t<wf::post_input_event_signal<wlr_pointer_motion_event>> on_pointer_motion =
@@ -1840,71 +1910,71 @@ wf::signal::connection_t<wf::view_move_request_signal> on_move_request =
         }
     };
     
-// Handle pointer button release - complete or cancel drag
-wf::signal::connection_t<wf::post_input_event_signal<wlr_pointer_button_event>> on_pointer_button =
-    [this] (wf::post_input_event_signal<wlr_pointer_button_event> *ev)
-{
-    if (!m_dragState.isDragging)
-        return;
-    
-    // Handle button release - WLR_BUTTON_RELEASED is enum value 0
-    if (ev->event->state == WLR_BUTTON_PRESSED)
-        return;
-    
-    handleDrop();
-};
+    // Handle pointer button release - complete or cancel drag
+    wf::signal::connection_t<wf::post_input_event_signal<wlr_pointer_button_event>> on_pointer_button =
+        [this] (wf::post_input_event_signal<wlr_pointer_button_event> *ev)
+    {
+        if (!m_dragState.isDragging)
+            return;
+        
+        // Handle button release - WLR_BUTTON_RELEASED is enum value 0
+        if (ev->event->state == WLR_BUTTON_PRESSED)
+            return;
+        
+        handleDrop();
+    };
 
-void handleDrop()
-{
-    if (!m_dragState.isDragging || !m_dragState.draggedView)
+    void handleDrop()
     {
-        m_dragState.reset();
-        return;
+        if (!m_dragState.isDragging || !m_dragState.draggedView)
+        {
+            m_dragState.reset();
+            return;
+        }
+        
+        updateCursorPosition();
+        
+        auto it = m_trees.find(m_dragState.sourceWorkspaceIndex);
+        if (it == m_trees.end())
+        {
+            cancelDrag();
+            return;
+        }
+        
+        auto tree = it->second.get();
+        tree->setCursorPosition(m_cursorPos);
+        
+        // Check drag distance
+        int dx = std::abs(m_cursorPos.x - m_dragState.dragStartCursor.x);
+        int dy = std::abs(m_cursorPos.y - m_dragState.dragStartCursor.y);
+        int threshold = opt_drag_threshold > 0 ? int(opt_drag_threshold) : 10;
+        
+        if (dx < threshold && dy < threshold)
+        {
+            cancelDrag();
+            return;
+        }
+        
+        // Find drop target
+        auto dropTarget = tree->findNodeAtPoint(m_cursorPos);
+        
+        if (dropTarget && dropTarget->isLeaf() && 
+            dropTarget != m_dragState.draggedNode &&
+            dropTarget->view() && 
+            dropTarget->view() != m_dragState.draggedView)
+        {
+            // Valid drop target - swap the windows
+            tree->swapNodes(m_dragState.draggedNode, dropTarget);
+            m_dragState.reset();
+            startAnimationLoop();
+        }
+        else
+        {
+            cancelDrag();
+        }
+        
+        output->render->damage_whole();
     }
-    
-    updateCursorPosition();
-    
-    auto it = m_trees.find(m_dragState.sourceWorkspaceIndex);
-    if (it == m_trees.end())
-    {
-        cancelDrag();
-        return;
-    }
-    
-    auto tree = it->second.get();
-    tree->setCursorPosition(m_cursorPos);
-    
-    // Check drag distance
-    int dx = std::abs(m_cursorPos.x - m_dragState.dragStartCursor.x);
-    int dy = std::abs(m_cursorPos.y - m_dragState.dragStartCursor.y);
-    int threshold = opt_drag_threshold > 0 ? int(opt_drag_threshold) : 10;
-    
-    if (dx < threshold && dy < threshold)
-    {
-        cancelDrag();
-        return;
-    }
-    
-    // Find drop target
-    auto dropTarget = tree->findNodeAtPoint(m_cursorPos);
-    
-    if (dropTarget && dropTarget->isLeaf() && 
-        dropTarget != m_dragState.draggedNode &&
-        dropTarget->view() && 
-        dropTarget->view() != m_dragState.draggedView)
-    {
-        // Valid drop target - swap the windows
-        tree->swapNodes(m_dragState.draggedNode, dropTarget);
-        m_dragState.reset();
-        startAnimationLoop();
-    }
-    else
-    {
-        cancelDrag();
-    }
-    
-    output->render->damage_whole();
-}
     
     void cancelDrag()
     {
