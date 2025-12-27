@@ -2,253 +2,284 @@
 <wayfire>
     <plugin name="animated-tile">
         <_short>Animated Tiling</_short>
-        <_long>Hyprland-style animated tiling window management</_long>
+        <_long>Hyprland-style animated tiling layout with drag-to-swap support</_long>
         <category>Window Management</category>
         
-        <!-- Basic Options -->
-        <option name="tile_by_default" type="bool">
-            <_short>Tile by Default</_short>
-            <_long>Automatically tile new windows</_long>
-            <default>true</default>
-        </option>
+        <group>
+            <_short>General</_short>
+            
+            <option name="tile_by_default" type="bool">
+                <_short>Tile windows by default</_short>
+                <_long>Automatically tile new windows</_long>
+                <default>true</default>
+            </option>
+            
+            <option name="duration" type="int">
+                <_short>Animation duration (ms)</_short>
+                <_long>Default animation duration in milliseconds</_long>
+                <default>300</default>
+                <min>0</min>
+                <max>2000</max>
+            </option>
+            
+            <option name="max_windows_per_workspace" type="int">
+                <_short>Max windows per workspace</_short>
+                <_long>Maximum number of tiled windows per workspace. When exceeded, new windows are placed on the next available workspace. Set to 0 for unlimited.</_long>
+                <default>0</default>
+                <min>0</min>
+                <max>50</max>
+            </option>
+        </group>
         
-        <!-- Gaps (like Hyprland's gaps_in and gaps_out) -->
-        <option name="gaps_in" type="int">
-            <_short>Inner Gaps</_short>
-            <_long>Gap size between tiled windows (in pixels)</_long>
-            <default>5</default>
-            <min>0</min>
-            <max>100</max>
-        </option>
+        <group>
+            <_short>Gaps</_short>
+            
+            <option name="gaps_in" type="int">
+                <_short>Inner gaps</_short>
+                <_long>Gap between tiled windows</_long>
+                <default>5</default>
+                <min>0</min>
+                <max>100</max>
+            </option>
+            
+            <option name="gaps_out" type="int">
+                <_short>Outer gaps</_short>
+                <_long>Gap between windows and screen edge</_long>
+                <default>10</default>
+                <min>0</min>
+                <max>100</max>
+            </option>
+        </group>
         
-        <option name="gaps_out" type="int">
-            <_short>Outer Gaps</_short>
-            <_long>Gap size between windows and screen edges (in pixels)</_long>
-            <default>10</default>
-            <min>0</min>
-            <max>100</max>
-        </option>
+        <group>
+            <_short>Split Behavior</_short>
+            
+            <option name="preserve_split" type="bool">
+                <_short>Preserve split direction</_short>
+                <_long>Keep split direction when layout changes (like Hyprland's preserve_split)</_long>
+                <default>false</default>
+            </option>
+            
+            <option name="split_width_multiplier" type="double">
+                <_short>Split width multiplier</_short>
+                <_long>Multiplier for width when determining split direction (useful for ultrawide monitors)</_long>
+                <default>1.0</default>
+                <min>0.1</min>
+                <max>3.0</max>
+                <precision>0.1</precision>
+            </option>
+            
+            <option name="force_split" type="int">
+                <_short>Force split direction</_short>
+                <_long>0 = based on mouse position, 1 = always left/top, 2 = always right/bottom</_long>
+                <default>0</default>
+                <min>0</min>
+                <max>2</max>
+            </option>
+            
+            <option name="smart_split" type="bool">
+                <_short>Smart split</_short>
+                <_long>Split based on cursor position relative to focused window</_long>
+                <default>false</default>
+            </option>
+        </group>
         
-        <!-- Dwindle Layout Options (like Hyprland) -->
-        <option name="preserve_split" type="bool">
-            <_short>Preserve Split</_short>
-            <_long>If enabled, split direction won't change when container is resized</_long>
-            <default>false</default>
-        </option>
+        <group>
+            <_short>Drag to Swap</_short>
+            
+            <option name="enable_drag_swap" type="bool">
+                <_short>Enable drag to swap</_short>
+                <_long>Allow dragging tiled windows to swap positions in the hierarchy</_long>
+                <default>true</default>
+            </option>
+            
+            <option name="drag_threshold" type="int">
+                <_short>Drag threshold (pixels)</_short>
+                <_long>Minimum distance to drag before swap activates</_long>
+                <default>10</default>
+                <min>1</min>
+                <max>100</max>
+            </option>
+        </group>
         
-        <option name="force_split" type="int">
-            <_short>Force Split</_short>
-            <_long>0 = split follows mouse, 1 = always split left/top, 2 = always split right/bottom</_long>
-            <default>0</default>
-            <min>0</min>
-            <max>2</max>
-        </option>
+        <group>
+            <_short>Default Bezier Curve</_short>
+            
+            <option name="bezier_p1_x" type="double">
+                <_short>Control point 1 X</_short>
+                <default>0.25</default>
+                <min>0.0</min>
+                <max>1.0</max>
+                <precision>0.01</precision>
+            </option>
+            
+            <option name="bezier_p1_y" type="double">
+                <_short>Control point 1 Y</_short>
+                <default>0.1</default>
+                <min>-1.0</min>
+                <max>2.0</max>
+                <precision>0.01</precision>
+            </option>
+            
+            <option name="bezier_p2_x" type="double">
+                <_short>Control point 2 X</_short>
+                <default>0.25</default>
+                <min>0.0</min>
+                <max>1.0</max>
+                <precision>0.01</precision>
+            </option>
+            
+            <option name="bezier_p2_y" type="double">
+                <_short>Control point 2 Y</_short>
+                <default>1.0</default>
+                <min>-1.0</min>
+                <max>2.0</max>
+                <precision>0.01</precision>
+            </option>
+        </group>
         
-        <option name="smart_split" type="bool">
-            <_short>Smart Split</_short>
-            <_long>Split direction based on cursor position relative to window center</_long>
-            <default>false</default>
-        </option>
+        <group>
+            <_short>Window In Animation</_short>
+            
+            <option name="duration_in" type="int">
+                <_short>Duration (ms)</_short>
+                <_long>Animation duration for new windows (0 = use default)</_long>
+                <default>0</default>
+                <min>0</min>
+                <max>2000</max>
+            </option>
+            
+            <option name="popin_percent" type="double">
+                <_short>Popin scale</_short>
+                <_long>Starting scale for popin animation (0.8 = start at 80% size)</_long>
+                <default>0.8</default>
+                <min>0.0</min>
+                <max>1.0</max>
+                <precision>0.05</precision>
+            </option>
+            
+            <option name="bezier_in_p1_x" type="double">
+                <_short>Bezier P1 X</_short>
+                <_long>Custom bezier for windowsIn (0 = use default)</_long>
+                <default>0</default>
+                <min>0.0</min>
+                <max>1.0</max>
+                <precision>0.01</precision>
+            </option>
+            
+            <option name="bezier_in_p1_y" type="double">
+                <_short>Bezier P1 Y</_short>
+                <default>0</default>
+                <min>-1.0</min>
+                <max>2.0</max>
+                <precision>0.01</precision>
+            </option>
+            
+            <option name="bezier_in_p2_x" type="double">
+                <_short>Bezier P2 X</_short>
+                <default>0</default>
+                <min>0.0</min>
+                <max>1.0</max>
+                <precision>0.01</precision>
+            </option>
+            
+            <option name="bezier_in_p2_y" type="double">
+                <_short>Bezier P2 Y</_short>
+                <default>0</default>
+                <min>-1.0</min>
+                <max>2.0</max>
+                <precision>0.01</precision>
+            </option>
+        </group>
         
-        <option name="split_width_multiplier" type="double">
-            <_short>Split Width Multiplier</_short>
-            <_long>Multiplier for width when deciding split direction. Increase for ultrawide monitors.</_long>
-            <default>1.0</default>
-            <min>0.1</min>
-            <max>5.0</max>
-            <precision>0.1</precision>
-        </option>
+        <group>
+            <_short>Window Out Animation</_short>
+            
+            <option name="duration_out" type="int">
+                <_short>Duration (ms)</_short>
+                <_long>Animation duration for closing windows (0 = use default)</_long>
+                <default>0</default>
+                <min>0</min>
+                <max>2000</max>
+            </option>
+            
+            <option name="bezier_out_p1_x" type="double">
+                <_short>Bezier P1 X</_short>
+                <_long>Custom bezier for windowsOut (0 = use default)</_long>
+                <default>0</default>
+                <min>0.0</min>
+                <max>1.0</max>
+                <precision>0.01</precision>
+            </option>
+            
+            <option name="bezier_out_p1_y" type="double">
+                <_short>Bezier P1 Y</_short>
+                <default>0</default>
+                <min>-1.0</min>
+                <max>2.0</max>
+                <precision>0.01</precision>
+            </option>
+            
+            <option name="bezier_out_p2_x" type="double">
+                <_short>Bezier P2 X</_short>
+                <default>0</default>
+                <min>0.0</min>
+                <max>1.0</max>
+                <precision>0.01</precision>
+            </option>
+            
+            <option name="bezier_out_p2_y" type="double">
+                <_short>Bezier P2 Y</_short>
+                <default>0</default>
+                <min>-1.0</min>
+                <max>2.0</max>
+                <precision>0.01</precision>
+            </option>
+        </group>
         
-        <!-- Animation Timing -->
-        <option name="duration" type="int">
-            <_short>Animation Duration</_short>
-            <_long>Default animation duration in milliseconds</_long>
-            <default>300</default>
-            <min>0</min>
-            <max>2000</max>
-        </option>
-        
-        <option name="duration_in" type="int">
-            <_short>Window Open Duration</_short>
-            <_long>Animation duration for opening windows (0 = use default)</_long>
-            <default>0</default>
-            <min>0</min>
-            <max>2000</max>
-        </option>
-        
-        <option name="duration_out" type="int">
-            <_short>Window Close Duration</_short>
-            <_long>Animation duration for closing windows (0 = use default)</_long>
-            <default>0</default>
-            <min>0</min>
-            <max>2000</max>
-        </option>
-        
-        <option name="duration_move" type="int">
-            <_short>Window Move Duration</_short>
-            <_long>Animation duration for moving/resizing windows (0 = use default)</_long>
-            <default>0</default>
-            <min>0</min>
-            <max>2000</max>
-        </option>
-        
-        <!-- Bezier Curve (like Hyprland's bezier keyword) -->
-        <option name="bezier_p1_x" type="double">
-            <_short>Bezier P1 X</_short>
-            <_long>First control point X coordinate for animation curve</_long>
-            <default>0.05</default>
-            <min>0.0</min>
-            <max>1.0</max>
-            <precision>0.01</precision>
-        </option>
-        
-        <option name="bezier_p1_y" type="double">
-            <_short>Bezier P1 Y</_short>
-            <_long>First control point Y coordinate for animation curve</_long>
-            <default>0.9</default>
-            <min>-1.0</min>
-            <max>2.0</max>
-            <precision>0.01</precision>
-        </option>
-        
-        <option name="bezier_p2_x" type="double">
-            <_short>Bezier P2 X</_short>
-            <_long>Second control point X coordinate for animation curve</_long>
-            <default>0.1</default>
-            <min>0.0</min>
-            <max>1.0</max>
-            <precision>0.01</precision>
-        </option>
-        
-        <option name="bezier_p2_y" type="double">
-            <_short>Bezier P2 Y</_short>
-            <_long>Second control point Y coordinate for animation curve</_long>
-            <default>1.05</default>
-            <min>-1.0</min>
-            <max>2.0</max>
-            <precision>0.01</precision>
-        </option>
-        
-        <!-- Popin Animation -->
-        <option name="popin_percent" type="double">
-            <_short>Popin Start Percentage</_short>
-            <_long>Starting scale for popin animation (0.8 = animate from 80% to 100%)</_long>
-            <default>0.8</default>
-            <min>0.0</min>
-            <max>1.0</max>
-            <precision>0.05</precision>
-        </option>
-        
-        <!-- Bezier Curves for windowsIn (opening windows) -->
-        <!-- Set all to 0 to use default bezier -->
-        <option name="bezier_in_p1_x" type="double">
-            <_short>WindowsIn Bezier P1 X</_short>
-            <_long>First control point X for window open animation (0 = use default)</_long>
-            <default>0</default>
-            <min>0.0</min>
-            <max>1.0</max>
-            <precision>0.01</precision>
-        </option>
-        
-        <option name="bezier_in_p1_y" type="double">
-            <_short>WindowsIn Bezier P1 Y</_short>
-            <_long>First control point Y for window open animation</_long>
-            <default>0</default>
-            <min>-1.0</min>
-            <max>2.0</max>
-            <precision>0.01</precision>
-        </option>
-        
-        <option name="bezier_in_p2_x" type="double">
-            <_short>WindowsIn Bezier P2 X</_short>
-            <_long>Second control point X for window open animation</_long>
-            <default>0</default>
-            <min>0.0</min>
-            <max>1.0</max>
-            <precision>0.01</precision>
-        </option>
-        
-        <option name="bezier_in_p2_y" type="double">
-            <_short>WindowsIn Bezier P2 Y</_short>
-            <_long>Second control point Y for window open animation</_long>
-            <default>0</default>
-            <min>-1.0</min>
-            <max>2.0</max>
-            <precision>0.01</precision>
-        </option>
-        
-        <!-- Bezier Curves for windowsOut (closing windows) -->
-        <option name="bezier_out_p1_x" type="double">
-            <_short>WindowsOut Bezier P1 X</_short>
-            <_long>First control point X for window close animation (0 = use default)</_long>
-            <default>0</default>
-            <min>0.0</min>
-            <max>1.0</max>
-            <precision>0.01</precision>
-        </option>
-        
-        <option name="bezier_out_p1_y" type="double">
-            <_short>WindowsOut Bezier P1 Y</_short>
-            <_long>First control point Y for window close animation</_long>
-            <default>0</default>
-            <min>-1.0</min>
-            <max>2.0</max>
-            <precision>0.01</precision>
-        </option>
-        
-        <option name="bezier_out_p2_x" type="double">
-            <_short>WindowsOut Bezier P2 X</_short>
-            <_long>Second control point X for window close animation</_long>
-            <default>0</default>
-            <min>0.0</min>
-            <max>1.0</max>
-            <precision>0.01</precision>
-        </option>
-        
-        <option name="bezier_out_p2_y" type="double">
-            <_short>WindowsOut Bezier P2 Y</_short>
-            <_long>Second control point Y for window close animation</_long>
-            <default>0</default>
-            <min>-1.0</min>
-            <max>2.0</max>
-            <precision>0.01</precision>
-        </option>
-        
-        <!-- Bezier Curves for windowsMove (resize/reposition) -->
-        <option name="bezier_move_p1_x" type="double">
-            <_short>WindowsMove Bezier P1 X</_short>
-            <_long>First control point X for resize/move animation (0 = use default)</_long>
-            <default>0</default>
-            <min>0.0</min>
-            <max>1.0</max>
-            <precision>0.01</precision>
-        </option>
-        
-        <option name="bezier_move_p1_y" type="double">
-            <_short>WindowsMove Bezier P1 Y</_short>
-            <_long>First control point Y for resize/move animation</_long>
-            <default>0</default>
-            <min>-1.0</min>
-            <max>2.0</max>
-            <precision>0.01</precision>
-        </option>
-        
-        <option name="bezier_move_p2_x" type="double">
-            <_short>WindowsMove Bezier P2 X</_short>
-            <_long>Second control point X for resize/move animation</_long>
-            <default>0</default>
-            <min>0.0</min>
-            <max>1.0</max>
-            <precision>0.01</precision>
-        </option>
-        
-        <option name="bezier_move_p2_y" type="double">
-            <_short>WindowsMove Bezier P2 Y</_short>
-            <_long>Second control point Y for resize/move animation</_long>
-            <default>0</default>
-            <min>-1.0</min>
-            <max>2.0</max>
-            <precision>0.01</precision>
-        </option>
+        <group>
+            <_short>Window Move Animation</_short>
+            
+            <option name="duration_move" type="int">
+                <_short>Duration (ms)</_short>
+                <_long>Animation duration for layout changes (0 = use default)</_long>
+                <default>0</default>
+                <min>0</min>
+                <max>2000</max>
+            </option>
+            
+            <option name="bezier_move_p1_x" type="double">
+                <_short>Bezier P1 X</_short>
+                <_long>Custom bezier for windowsMove (0 = use default)</_long>
+                <default>0</default>
+                <min>0.0</min>
+                <max>1.0</max>
+                <precision>0.01</precision>
+            </option>
+            
+            <option name="bezier_move_p1_y" type="double">
+                <_short>Bezier P1 Y</_short>
+                <default>0</default>
+                <min>-1.0</min>
+                <max>2.0</max>
+                <precision>0.01</precision>
+            </option>
+            
+            <option name="bezier_move_p2_x" type="double">
+                <_short>Bezier P2 X</_short>
+                <default>0</default>
+                <min>0.0</min>
+                <max>1.0</max>
+                <precision>0.01</precision>
+            </option>
+            
+            <option name="bezier_move_p2_y" type="double">
+                <_short>Bezier P2 Y</_short>
+                <default>0</default>
+                <min>-1.0</min>
+                <max>2.0</max>
+                <precision>0.01</precision>
+            </option>
+        </group>
     </plugin>
 </wayfire>
